@@ -1,7 +1,8 @@
 {
   "compilerOptions": {
     "target": "ES2021",
-    "module": "CommonJS",
+    "module": "commonjs",
+    "moduleResolution": "node",
     "outDir": "./lib",
     "rootDir": "./src",
     "strict": true,
@@ -9,8 +10,9 @@
     "experimentalDecorators": true,
     "emitDecoratorMetadata": true,
     "skipLibCheck": true,
-    "moduleResolution": "node",
-    "resolveJsonModule": true
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "noImplicitAny": false
   },
   "include": ["src/**/*.ts"],
   "exclude": ["node_modules", "lib"]

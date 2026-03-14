@@ -1,212 +1,197 @@
 import {
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
   ChannelType,
   Client,
   Colors,
   EmbedBuilder,
-  Guild,
   PermissionFlagsBits,
-  PermissionsBitField,
-  TextChannel,
+  TextChannel
 } from 'discord.js';
-import { AppDataSource } from '../typeorm';
-import { Ticket } from '../typeorm/entities/Ticket';
-import { TicketConfig } from '../typeorm/entities/TicketConfig';
-import { CUSTOM_IDS } from '../utils/types';
+import { AppDataSource } from '../data-source';
+import { Ticket } from '../entities/Ticket';
+import { TicketPanel } from '../entities/TicketPanel';
+import { TicketType } from '../entities/TicketType';
+import { buildClosedTicketComponents, buildClosedTicketEmbed, buildOpenTicketComponents, buildOpenTicketEmbed, buildPanelMessage, slugify } from '../utils/discord';
+import { buildTranscriptAttachment } from './transcriptService';
 
-const ticketRepo = AppDataSource.getRepository(Ticket);
+export class TicketService {
+  private ticketRepo = AppDataSource.getRepository(Ticket);
+  private panelRepo = AppDataSource.getRepository(TicketPanel);
+  private typeRepo = AppDataSource.getRepository(TicketType);
 
-export function buildPanelEmbed(config: TicketConfig): EmbedBuilder {
-  return new EmbedBuilder()
-    .setColor(Colors.Blurple)
-    .setTitle(`🎟 ${config.panelTitle}`)
-    .setDescription(config.panelDescription)
-    .addFields(
-      {
-        name: 'Quick Start',
-        value:
-          'Press the button below, fill out the form, and a private ticket channel will be created for you.',
-      },
-      {
-        name: 'Staff Commands',
-        value:
-          '`/claim` · `/close` · `/reopen` · `/rename` · `/add` · `/remove` · `/close-request`',
-      }
-    );
-}
-
-export function buildPanelComponents(config: TicketConfig) {
-  return [
-    new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder()
-        .setCustomId(CUSTOM_IDS.createTicket)
-        .setLabel(config.buttonLabel)
-        .setStyle(ButtonStyle.Primary)
-    ),
-  ];
-}
-
-export function buildTicketControls(ticket: Ticket, claimedByText?: string) {
-  const summary = new EmbedBuilder()
-    .setColor(ticket.status === 'open' ? Colors.Green : Colors.Red)
-    .setTitle(`Ticket #${ticket.id.toString().padStart(4, '0')}`)
-    .setDescription(ticket.details || 'No extra details provided.')
-    .addFields(
-      { name: 'Opened By', value: ticket.openerId ? `<@${ticket.openerId}>` : 'Unknown', inline: true },
-      { name: 'Reason', value: ticket.reason || 'No reason provided', inline: true },
-      { name: 'Claimed By', value: claimedByText || 'Nobody yet', inline: true }
-    );
-
-  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder()
-      .setCustomId(CUSTOM_IDS.ticketClaim)
-      .setLabel('Claim')
-      .setStyle(ButtonStyle.Primary)
-      .setDisabled(ticket.status !== 'open'),
-    new ButtonBuilder()
-      .setCustomId(CUSTOM_IDS.ticketClose)
-      .setLabel('Close')
-      .setStyle(ButtonStyle.Danger)
-      .setDisabled(ticket.status !== 'open'),
-    new ButtonBuilder()
-      .setCustomId(CUSTOM_IDS.ticketReopen)
-      .setLabel('Reopen')
-      .setStyle(ButtonStyle.Success)
-      .setDisabled(ticket.status !== 'closed')
-  );
-
-  return { embeds: [summary], components: [row] };
-}
-
-export async function createTicketChannel(options: {
-  client: Client;
-  guild: Guild;
-  config: TicketConfig;
-  openerId: string;
-  reason: string;
-  details: string;
-}) {
-  const { client, guild, config, openerId, reason, details } = options;
-
-  if (!config.ticketCategoryId) {
-    throw new Error('Ticket category is not configured.');
+  async deployPanel(client: Client, panelId: number) {
+    const panel = await this.panelRepo.findOne({ where: { id: panelId }, relations: ['types'] });
+    if (!panel) throw new Error('Panel not found.');
+    if (!panel.panelChannelId) throw new Error('Panel channel is not set.');
+    const channel = await client.channels.fetch(panel.panelChannelId);
+    if (!channel || !channel.isTextBased()) throw new Error('Panel channel could not be found.');
+    const message = await (channel as TextChannel).send(buildPanelMessage(panel, panel.types as TicketType[]) as any);
+    panel.panelMessageId = message.id;
+    panel.isDraft = false;
+    await this.panelRepo.save(panel);
+    return message;
   }
 
-  const existing = await ticketRepo.findOneBy({
-    guildId: guild.id,
-    openerId,
-    status: 'open',
-  });
+  async createTicket(client: Client, ticketTypeId: number, creatorId: string, username: string, answers: Record<string, string>) {
+    const type = await this.typeRepo.findOne({ where: { id: ticketTypeId }, relations: ['panel', 'fields'] });
+    if (!type) throw new Error('Ticket type not found.');
+    if (!type.openCategoryId) throw new Error('This ticket type has no open category configured yet.');
 
-  if (existing?.channelId) {
-    const existingChannel = guild.channels.cache.get(existing.channelId);
-    if (existingChannel) {
-      return { existingChannel, ticket: existing, created: false as const };
+    const openCount = await this.ticketRepo.count({ where: { ticketTypeId: type.id, creatorId, status: 'open' } });
+    if (openCount >= type.maxOpenPerUser) {
+      throw new Error(`You already have ${type.maxOpenPerUser} open ticket(s) for ${type.name}. Please close one before opening another.`);
     }
-  }
 
-  const ticket = await ticketRepo.save(
-    ticketRepo.create({
-      guildId: guild.id,
-      openerId,
-      reason,
-      details,
-      status: 'open',
-    })
-  );
+    type.counter += 1;
+    await this.typeRepo.save(type);
 
-  const overwrites = [
-    {
-      id: guild.roles.everyone.id,
-      deny: [PermissionFlagsBits.ViewChannel],
-    },
-    {
-      id: openerId,
-      allow: [
-        PermissionFlagsBits.ViewChannel,
-        PermissionFlagsBits.SendMessages,
-        PermissionFlagsBits.ReadMessageHistory,
-        PermissionFlagsBits.AttachFiles,
+    const rawName = type.panel.namingFormat
+      .replaceAll('{counter}', String(type.counter))
+      .replaceAll('{username}', username)
+      .replaceAll('{userid}', creatorId)
+      .replaceAll('{type}', type.name);
+
+    const channelName = slugify(rawName) || `ticket-${type.counter}`;
+    const guild = await client.guilds.fetch(type.guildId);
+    const channel = await guild.channels.create({
+      name: channelName,
+      type: ChannelType.GuildText,
+      parent: type.openCategoryId,
+      permissionOverwrites: [
+        { id: guild.id, deny: [PermissionFlagsBits.ViewChannel] },
+        { id: creatorId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+        { id: client.user!.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels] },
+        ...((type.supportRoleIds || []).map((roleId) => ({ id: roleId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] })))
       ],
-    },
-    {
-      id: client.user!.id,
-      allow: [PermissionsBitField.Flags.Administrator],
-    },
-  ];
-
-  if (config.supportRoleId) {
-    overwrites.push({
-      id: config.supportRoleId,
-      allow: [
-        PermissionFlagsBits.ViewChannel,
-        PermissionFlagsBits.SendMessages,
-        PermissionFlagsBits.ReadMessageHistory,
-        PermissionFlagsBits.ManageChannels,
-      ],
+      topic: `Ticket for ${creatorId} | Type ${type.id}`
     });
+
+    const ticket = this.ticketRepo.create({
+      guildId: type.guildId,
+      panelId: type.panel.id,
+      ticketTypeId: type.id,
+      channelId: channel.id,
+      creatorId,
+      displayName: channelName,
+      status: 'open',
+      formJson: JSON.stringify(answers)
+    });
+    const saved = await this.ticketRepo.save(ticket);
+
+    const answerText = Object.entries(answers).length
+      ? Object.entries(answers).map(([key, value]) => `**${key}**\n${value}`).join('\n\n')
+      : 'No form answers provided.';
+
+    const ticketEmbed = buildOpenTicketEmbed(channelName, type.name, creatorId, null)
+      .setColor(Colors.Green)
+      .addFields({ name: 'Form Answers', value: answerText.slice(0, 1024) || 'No answers.', inline: false });
+
+    await (channel as TextChannel).send({
+      content: `<@${creatorId}> ${(type.supportRoleIds || []).map((id) => `<@&${id}>`).join(' ')}`.trim(),
+      embeds: [ticketEmbed],
+      components: buildOpenTicketComponents(type.panel.claimEnabled) as any
+    } as any);
+
+    return { ticket: saved, channel };
   }
 
-  const channel = await guild.channels.create({
-    name: `ticket-${ticket.id.toString().padStart(4, '0')}`,
-    type: ChannelType.GuildText,
-    parent: config.ticketCategoryId,
-    permissionOverwrites: overwrites,
-    topic: `Ticket ${ticket.id} | opener ${openerId}`,
-  });
+  async getTicketByChannel(channelId: string) {
+    return this.ticketRepo.findOne({ where: { channelId } });
+  }
 
-  const firstMessage = await (channel as TextChannel).send({
-    content: `${config.supportRoleId ? `<@&${config.supportRoleId}> ` : ''}<@${openerId}>`,
-    ...buildTicketControls(ticket),
-  });
+  async closeTicket(client: Client, channelId: string, closedById: string) {
+    const ticket = await this.getTicketByChannel(channelId);
+    if (!ticket) throw new Error('Ticket record not found.');
+    if (ticket.status === 'closed') return ticket;
 
-  ticket.channelId = channel.id;
-  ticket.messageId = firstMessage.id;
-  await ticketRepo.save(ticket);
+    const type = await this.typeRepo.findOne({ where: { id: ticket.ticketTypeId }, relations: ['panel'] });
+    if (!type) throw new Error('Ticket type not found.');
+    const channel = await client.channels.fetch(channelId);
+    if (!channel || !channel.isTextBased()) throw new Error('Ticket channel not found.');
 
-  await sendLog(config, guild, '🎫 Ticket Created', [
-    `Ticket: ${channel}`,
-    `User: <@${openerId}>`,
-    `Reason: ${reason}`,
-  ]);
+    ticket.status = 'closed';
+    ticket.closedById = closedById;
+    ticket.closedAt = new Date();
+    await this.ticketRepo.save(ticket);
 
-  return { channel, ticket, created: true as const };
+    const targetCategoryId = type.closedCategoryId || type.panel.defaultClosedCategoryId;
+    if (targetCategoryId && 'setParent' in channel) {
+      await (channel as TextChannel).setParent(targetCategoryId).catch(() => null);
+    }
+
+    await (channel as TextChannel).send({
+      embeds: [buildClosedTicketEmbed(ticket.displayName, ticket.claimedById, ticket.closedById)],
+      components: buildClosedTicketComponents() as any
+    } as any);
+
+    return ticket;
+  }
+
+  async reopenTicket(client: Client, channelId: string) {
+    const ticket = await this.getTicketByChannel(channelId);
+    if (!ticket) throw new Error('Ticket record not found.');
+    const type = await this.typeRepo.findOne({ where: { id: ticket.ticketTypeId }, relations: ['panel'] });
+    if (!type) throw new Error('Ticket type not found.');
+    const channel = await client.channels.fetch(channelId);
+    if (!channel || !channel.isTextBased()) throw new Error('Ticket channel not found.');
+
+    ticket.status = 'open';
+    ticket.closedById = null;
+    ticket.closedAt = null;
+    await this.ticketRepo.save(ticket);
+
+    if (type.openCategoryId && 'setParent' in channel) {
+      await (channel as TextChannel).setParent(type.openCategoryId).catch(() => null);
+    }
+
+    await (channel as TextChannel).send({
+      embeds: [buildOpenTicketEmbed(ticket.displayName, type.name, ticket.creatorId, ticket.claimedById)],
+      components: buildOpenTicketComponents(type.panel.claimEnabled) as any
+    } as any);
+
+    return ticket;
+  }
+
+  async setClaim(channelId: string, staffId: string | null) {
+    const ticket = await this.getTicketByChannel(channelId);
+    if (!ticket) throw new Error('Ticket record not found.');
+    ticket.claimedById = staffId;
+    return this.ticketRepo.save(ticket);
+  }
+
+  async generateTranscriptAndLog(client: Client, channelId: string) {
+    const ticket = await this.getTicketByChannel(channelId);
+    if (!ticket) throw new Error('Ticket record not found.');
+    const type = await this.typeRepo.findOne({ where: { id: ticket.ticketTypeId }, relations: ['panel'] });
+    if (!type) throw new Error('Ticket type not found.');
+    const channel = await client.channels.fetch(channelId);
+    if (!channel || channel.type !== ChannelType.GuildText) throw new Error('Ticket channel not found.');
+
+    const attachment = await buildTranscriptAttachment(channel as TextChannel, ticket.displayName);
+
+    if (type.panel.logChannelId) {
+      const logChannel = await client.channels.fetch(type.panel.logChannelId);
+      if (logChannel && logChannel.isTextBased()) {
+        await (logChannel as TextChannel).send({
+          content: `Closed Ticket: **${ticket.displayName}**\nCreator: <@${ticket.creatorId}>\nClaimed By: ${ticket.claimedById ? `<@${ticket.claimedById}>` : 'Nobody'}\nClosed By: ${ticket.closedById ? `<@${ticket.closedById}>` : 'Unknown'}`,
+          files: [attachment]
+        } as any);
+      }
+    }
+
+    return attachment;
+  }
+
+  async deleteTicket(client: Client, channelId: string) {
+    const ticket = await this.getTicketByChannel(channelId);
+    if (!ticket) throw new Error('Ticket record not found.');
+    const channel = await client.channels.fetch(channelId);
+    if (channel && channel.isTextBased()) {
+      await this.generateTranscriptAndLog(client, channelId);
+      await channel.delete('Ticket deleted');
+    }
+    ticket.status = 'deleted';
+    await this.ticketRepo.save(ticket);
+  }
 }
 
-export async function sendLog(
-  config: TicketConfig,
-  guild: Guild,
-  title: string,
-  lines: string[]
-) {
-  if (!config.logsChannelId) return;
-  const logsChannel = guild.channels.cache.get(config.logsChannelId);
-  if (!logsChannel || logsChannel.type !== ChannelType.GuildText) return;
-
-  await (logsChannel as TextChannel).send({
-    embeds: [
-      new EmbedBuilder()
-        .setColor(Colors.Gold)
-        .setTitle(title)
-        .setDescription(lines.join('\n')),
-    ],
-  }).catch(() => null);
-}
-
-export async function syncTicketMessage(guild: Guild, ticket: Ticket) {
-  if (!ticket.channelId || !ticket.messageId) return;
-  const channel = guild.channels.cache.get(ticket.channelId);
-  if (!channel || channel.type !== ChannelType.GuildText) return;
-
-  const message = await (channel as TextChannel).messages.fetch(ticket.messageId).catch(() => null);
-  if (!message) return;
-
-  const claimedByText = ticket.claimedById ? `<@${ticket.claimedById}>` : 'Nobody yet';
-  await message.edit(buildTicketControls(ticket, claimedByText)).catch(() => null);
-}
-
-export function isStaffMember(memberRoleIds: string[], config: TicketConfig): boolean {
-  return Boolean(config.supportRoleId && memberRoleIds.includes(config.supportRoleId));
-}
+export const ticketService = new TicketService();

@@ -1,23 +1,37 @@
-export type TicketStatus = 'open' | 'closed';
+export type TicketStatus = 'open' | 'closed' | 'deleted';
+export type FieldStyle = 'short' | 'paragraph';
 
-export type ConfigStep =
-  | 'panel_channel'
-  | 'ticket_category'
-  | 'logs_channel'
-  | 'support_role';
+export const SETUP_CUSTOM_IDS = {
+  root: 'setup:root',
+  basics: 'setup:basics',
+  channels: 'setup:channels',
+  types: 'setup:types',
+  addType: 'setup:addType',
+  typeSelect: 'setup:typeSelect',
+  typeConfig: 'setup:typeConfig',
+  formFields: 'setup:formFields',
+  addField: 'setup:addField',
+  removeField: 'setup:removeField',
+  deploy: 'setup:deploy',
+  backRoot: 'setup:backRoot',
+  backTypes: 'setup:backTypes',
+  backTypeConfig: 'setup:backTypeConfig',
+  selectPanelChannel: 'setup:panelChannel',
+  selectLogChannel: 'setup:logChannel',
+  selectClosedCategory: 'setup:panelClosedCategory',
+  selectTypeOpenCategory: 'setup:typeOpenCategory',
+  selectTypeClosedCategory: 'setup:typeClosedCategory',
+  selectTypeRoles: 'setup:typeRoles'
+} as const;
 
-export const CUSTOM_IDS = {
-  createTicket: 'ticket:create',
-  ticketClaim: 'ticket:claim',
-  ticketClose: 'ticket:close',
-  ticketReopen: 'ticket:reopen',
-  setupRefresh: 'setup:refresh',
-  setupEditPanel: 'setup:edit-panel',
-  setupDeployPanel: 'setup:deploy-panel',
-  setupSelectPanelChannel: 'setup:select:panel_channel',
-  setupSelectTicketCategory: 'setup:select:ticket_category',
-  setupSelectLogsChannel: 'setup:select:logs_channel',
-  setupSelectSupportRole: 'setup:select:support_role',
-  ticketCreateModal: 'ticket:create-modal',
-  setupPanelModal: 'setup:panel-modal',
+export const TICKET_CUSTOM_IDS = {
+  panelTypeSelect: 'panel:typeSelect',
+  claim: 'ticket:claim',
+  unclaim: 'ticket:unclaim',
+  close: 'ticket:close',
+  reopen: 'ticket:reopen',
+  transcript: 'ticket:transcript',
+  delete: 'ticket:delete',
+  confirmDelete: 'ticket:confirmDelete',
+  cancelDelete: 'ticket:cancelDelete'
 } as const;

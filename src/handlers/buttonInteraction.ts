@@ -1,182 +1,257 @@
-import {
-  ActionRowBuilder,
-  ButtonInteraction,
-  ChannelType,
-  Client,
-  ModalBuilder,
-  TextChannel,
-  TextInputBuilder,
-  TextInputStyle,
-} from 'discord.js';
-import { AppDataSource } from '../typeorm';
-import { Ticket } from '../typeorm/entities/Ticket';
-import { getOrCreateConfig, updateConfig } from '../services/configService';
-import {
-  buildPanelComponents,
-  buildPanelEmbed,
-  sendLog,
-  syncTicketMessage,
-} from '../services/ticketService';
-import { buildSetupComponents, buildSetupEmbed } from './setupView';
-import { CUSTOM_IDS } from '../utils/types';
-
-const ticketRepo = AppDataSource.getRepository(Ticket);
+import { ButtonInteraction, ChannelSelectMenuInteraction, Client, ModalSubmitInteraction, RoleSelectMenuInteraction, StringSelectMenuInteraction, ActionRowBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } from 'discord.js';
+import { panelService } from '../services/panelService';
+import { setSelectedType, getSelectedType } from '../services/setupState';
+import { renderChannelsView, renderFieldView, renderSetupRoot, renderTypeConfigView, buildBasicsModal, buildAddTypeModal, buildAddFieldModal } from './setupView';
+import { SETUP_CUSTOM_IDS, TICKET_CUSTOM_IDS } from '../utils/types';
+import { ticketService } from '../services/ticketService';
+import { AppDataSource } from '../data-source';
+import { TicketType } from '../entities/TicketType';
+import { styleFromFieldStyle } from '../utils/discord';
 
 export async function handleButtonInteraction(client: Client, interaction: ButtonInteraction) {
-  if (!interaction.guild || !interaction.guildId) {
-    await interaction.reply({ content: 'This button only works in a server.', ephemeral: true });
+  const { customId } = interaction;
+
+  if (customId === SETUP_CUSTOM_IDS.basics) {
+    await interaction.showModal(buildBasicsModal());
+    return;
+  }
+  if (customId === SETUP_CUSTOM_IDS.channels) {
+    await renderChannelsView(interaction);
+    return;
+  }
+  if (customId === SETUP_CUSTOM_IDS.addType) {
+    await interaction.showModal(buildAddTypeModal());
+    return;
+  }
+  if (customId === SETUP_CUSTOM_IDS.typeConfig) {
+    await renderTypeConfigView(interaction);
+    return;
+  }
+  if (customId === SETUP_CUSTOM_IDS.formFields) {
+    await renderFieldView(interaction);
+    return;
+  }
+  if (customId === SETUP_CUSTOM_IDS.addField) {
+    await interaction.showModal(buildAddFieldModal());
+    return;
+  }
+  if (customId === SETUP_CUSTOM_IDS.backRoot) {
+    await renderSetupRoot(interaction);
+    return;
+  }
+  if (customId === SETUP_CUSTOM_IDS.backTypeConfig) {
+    await renderTypeConfigView(interaction);
+    return;
+  }
+  if (customId === SETUP_CUSTOM_IDS.deploy) {
+    const panel = await panelService.deployPanel(interaction.guildId!);
+    const message = await ticketService.deployPanel(client, panel.id);
+    await interaction.reply({ content: `Panel deployed in <#${panel.panelChannelId}>. Message ID: ${message.id}`, ephemeral: true } as any);
     return;
   }
 
-  const config = await getOrCreateConfig(interaction.guildId);
+  if (customId === TICKET_CUSTOM_IDS.claim) {
+    await ticketService.setClaim(interaction.channelId, interaction.user.id);
+    await interaction.reply({ content: `Claimed by <@${interaction.user.id}>.`, ephemeral: true } as any);
+    return;
+  }
+  if (customId === TICKET_CUSTOM_IDS.unclaim) {
+    await ticketService.setClaim(interaction.channelId, null);
+    await interaction.reply({ content: 'Ticket unclaimed.', ephemeral: true } as any);
+    return;
+  }
+  if (customId === TICKET_CUSTOM_IDS.close) {
+    await ticketService.closeTicket(client, interaction.channelId, interaction.user.id);
+    await interaction.reply({ content: 'Ticket closed.', ephemeral: true } as any);
+    return;
+  }
+  if (customId === TICKET_CUSTOM_IDS.reopen) {
+    await ticketService.reopenTicket(client, interaction.channelId);
+    await interaction.reply({ content: 'Ticket reopened.', ephemeral: true } as any);
+    return;
+  }
+  if (customId === TICKET_CUSTOM_IDS.transcript) {
+    const attachment = await ticketService.generateTranscriptAndLog(client, interaction.channelId);
+    await interaction.reply({ content: 'Transcript generated.', files: [attachment], ephemeral: true } as any);
+    return;
+  }
+  if (customId === TICKET_CUSTOM_IDS.delete) {
+    const confirmRow = new ActionRowBuilder<any>().addComponents(
+      { type: 2, style: 4, custom_id: TICKET_CUSTOM_IDS.confirmDelete, label: 'Confirm Delete' },
+      { type: 2, style: 2, custom_id: TICKET_CUSTOM_IDS.cancelDelete, label: 'Cancel' }
+    );
+    await interaction.reply({ content: 'Delete this ticket? This will generate a transcript and remove the channel.', components: [confirmRow], ephemeral: true } as any);
+    return;
+  }
+  if (customId === TICKET_CUSTOM_IDS.confirmDelete) {
+    await interaction.update({ content: 'Deleting ticket...', components: [] } as any);
+    await ticketService.deleteTicket(client, interaction.channelId);
+    return;
+  }
+  if (customId === TICKET_CUSTOM_IDS.cancelDelete) {
+    await interaction.update({ content: 'Delete cancelled.', components: [] } as any);
+    return;
+  }
+}
 
-  switch (interaction.customId) {
-    case CUSTOM_IDS.createTicket: {
-      const modal = new ModalBuilder()
-        .setCustomId(CUSTOM_IDS.ticketCreateModal)
-        .setTitle('Open a Ticket')
-        .addComponents(
-          new ActionRowBuilder<TextInputBuilder>().addComponents(
-            new TextInputBuilder()
-              .setCustomId('reason')
-              .setLabel('Reason')
-              .setRequired(true)
-              .setMaxLength(100)
-              .setStyle(TextInputStyle.Short)
-          ),
-          new ActionRowBuilder<TextInputBuilder>().addComponents(
-            new TextInputBuilder()
-              .setCustomId('details')
-              .setLabel('Details')
-              .setRequired(true)
-              .setMaxLength(1000)
-              .setStyle(TextInputStyle.Paragraph)
-          )
-        );
+export async function handleSelectMenuInteraction(interaction: StringSelectMenuInteraction | RoleSelectMenuInteraction | ChannelSelectMenuInteraction) {
+  const { customId } = interaction;
 
-      await interaction.showModal(modal);
+  if (customId === SETUP_CUSTOM_IDS.typeSelect && interaction.isStringSelectMenu()) {
+    setSelectedType(interaction.guildId!, Number(interaction.values[0]));
+    await renderSetupRoot(interaction);
+    return;
+  }
+
+  if (customId === SETUP_CUSTOM_IDS.removeField && interaction.isStringSelectMenu()) {
+    await panelService.removeField(Number(interaction.values[0]));
+    await renderFieldView(interaction);
+    return;
+  }
+
+  if (customId === SETUP_CUSTOM_IDS.selectPanelChannel && interaction.isChannelSelectMenu()) {
+    await panelService.updatePanelBasics(interaction.guildId!, { panelChannelId: interaction.values[0] || null });
+    await renderChannelsView(interaction);
+    return;
+  }
+
+  if (customId === SETUP_CUSTOM_IDS.selectLogChannel && interaction.isChannelSelectMenu()) {
+    await panelService.updatePanelBasics(interaction.guildId!, { logChannelId: interaction.values[0] || null });
+    await renderChannelsView(interaction);
+    return;
+  }
+
+  if (customId === SETUP_CUSTOM_IDS.selectClosedCategory && interaction.isChannelSelectMenu()) {
+    await panelService.updatePanelBasics(interaction.guildId!, { defaultClosedCategoryId: interaction.values[0] || null });
+    await renderChannelsView(interaction);
+    return;
+  }
+
+  const selectedTypeId = getSelectedType(interaction.guildId!);
+  if (!selectedTypeId) {
+    await interaction.reply({ content: 'Select a ticket type first.', ephemeral: true } as any);
+    return;
+  }
+
+  if (customId === SETUP_CUSTOM_IDS.selectTypeRoles && interaction.isRoleSelectMenu()) {
+    await panelService.updateTicketType(selectedTypeId, { supportRoleIds: interaction.values });
+    await renderTypeConfigView(interaction);
+    return;
+  }
+
+  if (customId === SETUP_CUSTOM_IDS.selectTypeOpenCategory && interaction.isChannelSelectMenu()) {
+    await panelService.updateTicketType(selectedTypeId, { openCategoryId: interaction.values[0] || null });
+    await renderTypeConfigView(interaction);
+    return;
+  }
+
+  if (customId === SETUP_CUSTOM_IDS.selectTypeClosedCategory && interaction.isChannelSelectMenu()) {
+    await panelService.updateTicketType(selectedTypeId, { closedCategoryId: interaction.values[0] || null });
+    await renderTypeConfigView(interaction);
+    return;
+  }
+
+  if (customId === TICKET_CUSTOM_IDS.panelTypeSelect && interaction.isStringSelectMenu()) {
+    const typeId = Number(interaction.values[0]);
+    const typeRepo = AppDataSource.getRepository(TicketType);
+    const type = await typeRepo.findOne({ where: { id: typeId }, relations: ['fields'] });
+    if (!type) {
+      await interaction.reply({ content: 'Ticket type not found.', ephemeral: true } as any);
       return;
     }
 
-    case CUSTOM_IDS.setupEditPanel: {
-      const modal = new ModalBuilder()
-        .setCustomId(CUSTOM_IDS.setupPanelModal)
-        .setTitle('Edit Ticket Panel')
-        .addComponents(
-          new ActionRowBuilder<TextInputBuilder>().addComponents(
-            new TextInputBuilder()
-              .setCustomId('panelTitle')
-              .setLabel('Panel Title')
-              .setRequired(true)
-              .setMaxLength(100)
-              .setValue(config.panelTitle)
-              .setStyle(TextInputStyle.Short)
-          ),
-          new ActionRowBuilder<TextInputBuilder>().addComponents(
-            new TextInputBuilder()
-              .setCustomId('buttonLabel')
-              .setLabel('Button Label')
-              .setRequired(true)
-              .setMaxLength(80)
-              .setValue(config.buttonLabel)
-              .setStyle(TextInputStyle.Short)
-          ),
-          new ActionRowBuilder<TextInputBuilder>().addComponents(
-            new TextInputBuilder()
-              .setCustomId('panelDescription')
-              .setLabel('Panel Description')
-              .setRequired(true)
-              .setMaxLength(1000)
-              .setValue(config.panelDescription)
-              .setStyle(TextInputStyle.Paragraph)
-          )
-        );
+    const modal = new ModalBuilder().setCustomId(`${TICKET_CUSTOM_IDS.panelTypeSelect}:${type.id}`).setTitle(`Open ${type.name}`);
+    const fields = (type.fields || []).sort((a, b) => a.sortOrder - b.sortOrder).slice(0, 5);
 
-      await interaction.showModal(modal);
-      return;
+    if (!fields.length) {
+      fields.push({ id: 0, label: 'Reason', placeholder: 'How can we help?', required: true, style: 'paragraph', sortOrder: 0 } as any);
     }
 
-    case CUSTOM_IDS.setupDeployPanel: {
-      if (!config.panelChannelId || !config.ticketCategoryId) {
-        await interaction.reply({
-          content: 'Set the panel channel and ticket category first.',
-          ephemeral: true,
-        });
-        return;
-      }
+    modal.addComponents(
+      ...fields.map((field) =>
+        new ActionRowBuilder<TextInputBuilder>().addComponents(
+          new TextInputBuilder()
+            .setCustomId(`field_${field.id}`)
+            .setLabel(field.label)
+            .setRequired(field.required)
+            .setStyle(styleFromFieldStyle(field.style))
+            .setPlaceholder(field.placeholder || '')
+            .setMaxLength(field.style === 'paragraph' ? 1000 : 200)
+        )
+      )
+    );
 
-      const channel = interaction.guild.channels.cache.get(config.panelChannelId);
-      if (!channel || channel.type !== ChannelType.GuildText) {
-        await interaction.reply({ content: 'The panel channel is missing or invalid.', ephemeral: true });
-        return;
-      }
+    await interaction.showModal(modal);
+    return;
+  }
+}
 
-      const sent = await (channel as TextChannel).send({
-        embeds: [buildPanelEmbed(config)],
-        components: buildPanelComponents(config),
-      });
+export async function handleModalSubmit(client: Client, interaction: ModalSubmitInteraction) {
+  if (interaction.customId === SETUP_CUSTOM_IDS.basics) {
+    await panelService.updatePanelBasics(interaction.guildId!, {
+      name: interaction.fields.getTextInputValue('name'),
+      panelTitle: interaction.fields.getTextInputValue('title'),
+      panelDescription: interaction.fields.getTextInputValue('description'),
+      namingFormat: interaction.fields.getTextInputValue('namingFormat')
+    });
+    await interaction.reply({ content: 'Panel basics updated.', ephemeral: true } as any);
+    return;
+  }
 
-      const updated = await updateConfig(interaction.guildId, { panelMessageId: sent.id });
-      await interaction.update({
-        embeds: [buildSetupEmbed(updated)],
-        components: buildSetupComponents(),
-      });
+  if (interaction.customId === SETUP_CUSTOM_IDS.addType) {
+    const panel = await panelService.addTicketType(
+      interaction.guildId!,
+      interaction.fields.getTextInputValue('typeName'),
+      interaction.fields.getTextInputValue('typeDescription')
+    );
+    const newType = panel.types[panel.types.length - 1];
+    if (newType) setSelectedType(interaction.guildId!, newType.id);
+    await interaction.reply({ content: `Added ticket type **${interaction.fields.getTextInputValue('typeName')}**.`, ephemeral: true } as any);
+    return;
+  }
+
+  if (interaction.customId === SETUP_CUSTOM_IDS.addField) {
+    const selectedTypeId = getSelectedType(interaction.guildId!);
+    if (!selectedTypeId) {
+      await interaction.reply({ content: 'Select a ticket type first.', ephemeral: true } as any);
       return;
     }
+    const styleValue = interaction.fields.getTextInputValue('style').trim().toLowerCase() === 'paragraph' ? 'paragraph' : 'short';
+    const requiredValue = ['yes', 'true', 'required', 'y', '1'].includes(interaction.fields.getTextInputValue('required').trim().toLowerCase());
+    await panelService.addField(
+      selectedTypeId,
+      interaction.fields.getTextInputValue('label'),
+      interaction.fields.getTextInputValue('placeholder') || null,
+      requiredValue,
+      styleValue
+    );
+    await interaction.reply({ content: 'Field added.', ephemeral: true } as any);
+    return;
+  }
 
-    case CUSTOM_IDS.setupRefresh: {
-      await interaction.update({
-        embeds: [buildSetupEmbed(config)],
-        components: buildSetupComponents(),
-      });
+  if (interaction.customId.startsWith(`${TICKET_CUSTOM_IDS.panelTypeSelect}:`)) {
+    const typeId = Number(interaction.customId.split(':')[1]);
+    const type = await AppDataSource.getRepository(TicketType).findOne({ where: { id: typeId }, relations: ['fields'] });
+    if (!type) {
+      await interaction.reply({ content: 'Ticket type not found.', ephemeral: true } as any);
       return;
     }
-
-    case CUSTOM_IDS.ticketClaim:
-    case CUSTOM_IDS.ticketClose:
-    case CUSTOM_IDS.ticketReopen: {
-      const ticket = await ticketRepo.findOneBy({ channelId: interaction.channelId });
-      if (!ticket) {
-        await interaction.reply({ content: 'Ticket not found for this channel.', ephemeral: true });
-        return;
+    const answers: Record<string, string> = {};
+    const fields = (type.fields || []).sort((a, b) => a.sortOrder - b.sortOrder);
+    if (!fields.length) {
+      answers['Reason'] = interaction.fields.getTextInputValue('field_0');
+    } else {
+      for (const field of fields.slice(0, 5)) {
+        answers[field.label] = interaction.fields.getTextInputValue(`field_${field.id}`);
       }
-
-      if (interaction.customId === CUSTOM_IDS.ticketClaim) {
-        ticket.claimedById = interaction.user.id;
-        await ticketRepo.save(ticket);
-        await syncTicketMessage(interaction.guild, ticket);
-        await interaction.reply({ content: `Ticket claimed by <@${interaction.user.id}>.` });
-        await sendLog(config, interaction.guild, '🧷 Ticket Claimed', [
-          `Ticket: <#${interaction.channelId}>`,
-          `By: <@${interaction.user.id}>`,
-        ]);
-        return;
-      }
-
-      if (interaction.customId === CUSTOM_IDS.ticketClose) {
-        ticket.status = 'closed';
-        await ticketRepo.save(ticket);
-        await syncTicketMessage(interaction.guild, ticket);
-        await interaction.reply({ content: 'Ticket closed.' });
-        await sendLog(config, interaction.guild, '🔒 Ticket Closed', [
-          `Ticket: <#${interaction.channelId}>`,
-          `By: <@${interaction.user.id}>`,
-        ]);
-        return;
-      }
-
-      ticket.status = 'open';
-      await ticketRepo.save(ticket);
-      await syncTicketMessage(interaction.guild, ticket);
-      await interaction.reply({ content: 'Ticket reopened.' });
-      await sendLog(config, interaction.guild, '🔓 Ticket Reopened', [
-        `Ticket: <#${interaction.channelId}>`,
-        `By: <@${interaction.user.id}>`,
-      ]);
-      return;
     }
 
-    default:
-      return;
+    try {
+      const { channel } = await ticketService.createTicket(client, typeId, interaction.user.id, interaction.user.username, answers);
+      await interaction.reply({ content: `Your ticket has been created: <#${channel.id}>`, ephemeral: true } as any);
+    } catch (error) {
+      await interaction.reply({ content: error instanceof Error ? error.message : 'Could not create ticket.', ephemeral: true } as any);
+    }
+    return;
   }
 }
