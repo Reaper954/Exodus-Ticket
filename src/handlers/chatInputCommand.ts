@@ -20,10 +20,16 @@ export async function handleChatInputCommand(client: Client, interaction: ChatIn
 
   switch (interaction.commandName) {
     case 'setup': {
-      await panelService.getOrCreateDraft(interaction.guildId!);
-      await renderSetupRoot(interaction);
+      const draft = await panelService.getOrCreateDraft(interaction.guildId!);
+      const view = renderSetupRoot(draft);
+
+      await interaction.reply({
+        ...view,
+        ephemeral: true,
+      } as any);
       return;
     }
+
     case 'help': {
       await interaction.reply({
         ephemeral: true,
@@ -36,68 +42,104 @@ export async function handleChatInputCommand(client: Client, interaction: ChatIn
           '`/rename <name>` rename the current ticket channel',
           '`/add <user>` add a user to the ticket',
           '`/remove <user>` remove a user from the ticket',
-          '`/close-request` ping staff that the opener wants the ticket closed'
-        ].join('\n')
+          '`/close-request` ping staff that the opener wants the ticket closed',
+        ].join('\n'),
       } as any);
       return;
     }
+
     case 'claim': {
-      const ticket = await ticketService.setClaim(interaction.channelId, interaction.user.id);
-      await interaction.reply({ content: `Claimed by <@${interaction.user.id}>.`, ephemeral: true } as any);
+      await ticketService.setClaim(interaction.channelId, interaction.user.id);
+      await interaction.reply({
+        content: `Claimed by <@${interaction.user.id}>.`,
+        ephemeral: true,
+      } as any);
       return;
     }
+
     case 'close': {
       await ticketService.closeTicket(client, interaction.channelId, interaction.user.id);
-      await interaction.reply({ content: 'Ticket closed.', ephemeral: true } as any);
+      await interaction.reply({
+        content: 'Ticket closed.',
+        ephemeral: true,
+      } as any);
       return;
     }
+
     case 'reopen': {
       await ticketService.reopenTicket(client, interaction.channelId);
-      await interaction.reply({ content: 'Ticket reopened.', ephemeral: true } as any);
+      await interaction.reply({
+        content: 'Ticket reopened.',
+        ephemeral: true,
+      } as any);
       return;
     }
+
     case 'rename': {
       const name = interaction.options.getString('name', true);
       if (interaction.channel?.isTextBased() && 'setName' in interaction.channel) {
         await (interaction.channel as any).setName(name);
       }
-      await interaction.reply({ content: `Renamed ticket to \`${name}\`.`, ephemeral: true } as any);
+      await interaction.reply({
+        content: `Renamed ticket to \`${name}\`.`,
+        ephemeral: true,
+      } as any);
       return;
     }
+
     case 'add': {
       const user = interaction.options.getUser('user', true);
       if (interaction.channel?.isTextBased() && 'permissionOverwrites' in interaction.channel) {
         await (interaction.channel as any).permissionOverwrites.edit(user.id, {
           ViewChannel: true,
           SendMessages: true,
-          ReadMessageHistory: true
+          ReadMessageHistory: true,
         });
       }
-      await interaction.reply({ content: `Added <@${user.id}> to the ticket.`, ephemeral: true } as any);
+      await interaction.reply({
+        content: `Added <@${user.id}> to the ticket.`,
+        ephemeral: true,
+      } as any);
       return;
     }
+
     case 'remove': {
       const user = interaction.options.getUser('user', true);
       if (interaction.channel?.isTextBased() && 'permissionOverwrites' in interaction.channel) {
         await (interaction.channel as any).permissionOverwrites.edit(user.id, {
           ViewChannel: false,
           SendMessages: false,
-          ReadMessageHistory: false
+          ReadMessageHistory: false,
         });
       }
-      await interaction.reply({ content: `Removed <@${user.id}> from the ticket.`, ephemeral: true } as any);
+      await interaction.reply({
+        content: `Removed <@${user.id}> from the ticket.`,
+        ephemeral: true,
+      } as any);
       return;
     }
+
     case 'close-request': {
       const ticketRepo = AppDataSource.getRepository(TicketType);
       const ticket = await ticketService.getTicketByChannel(interaction.channelId);
+
       if (!ticket) {
-        await interaction.reply({ content: 'This channel is not a tracked ticket.', ephemeral: true } as any);
+        await interaction.reply({
+          content: 'This channel is not a tracked ticket.',
+          ephemeral: true,
+        } as any);
         return;
       }
+
       const type = await ticketRepo.findOne({ where: { id: ticket.ticketTypeId } });
-      const pings = type?.supportRoleIds?.length ? type.supportRoleIds.map((id) => `<@&${id}>`).join(' ') : 'Staff';
-      await interaction.reply({ content: `${pings} — <@${interaction.user.id}> requested this ticket to be closed.` } as any);
+      const pings =
+        type?.supportRoleIds?.length
+          ? type.supportRoleIds.map((id) => `<@&${id}>`).join(' ')
+          : 'Staff';
+
+      await interaction.reply({
+        content: `${pings} — <@${interaction.user.id}> requested this ticket to be closed.`,
+      } as any);
       return;
     }
   }
